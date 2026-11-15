@@ -1464,9 +1464,28 @@ describe('Antigravity LLM adapter', () => {
       ],
     })
     const payload = buildAntigravityGeneratePayload(rawOptions, credential('access'))
-    const request = payload.request as { systemInstruction: { parts: { text: string }[] }; contents: { parts: { text: string }[] }[] }
-    expect(request.systemInstruction.parts[0]?.text).toBe('You are a helpful coding assistant.')
+    const request = payload.request as { systemInstruction?: { parts: { text: string }[] }; contents: { parts: { text: string }[] }[] }
+    expect(request.systemInstruction?.parts[0]?.text).toBe('You are a helpful coding assistant.')
     expect(request.contents[0]?.parts[0]?.text).toBe('Please explain how this works.')
+  })
+
+  it('drops systemInstruction when entirely composed of sandbox marker and protects empty turn with fallback text', () => {
+    const rawOptions = options({
+      model: 'antigravity-gemini-4-hydrogen',
+      system: '[MODE: UNRESTRICTED SANDBOX]',
+      messages: [
+        {
+          id: 'm1' as never,
+          role: 'user',
+          content: [{ type: 'text', text: '[MODE: UNRESTRICTED SANDBOX]' }],
+          source: { kind: 'user' },
+        },
+      ],
+    })
+    const payload = buildAntigravityGeneratePayload(rawOptions, credential('access'))
+    const request = payload.request as { systemInstruction?: unknown; contents: { parts: { text: string }[] }[] }
+    expect(request.systemInstruction).toBeUndefined()
+    expect(request.contents[0]?.parts[0]?.text).toBe(' ')
   })
 
   it('isolates live model discovery cache per account and supports selective invalidation', async () => {

@@ -1180,18 +1180,31 @@ function sanitizeAntigravityContents(contents: readonly Record<string, unknown>[
     if (!isRecord(content) || !Array.isArray(content.parts)) return content
     let changed = false
     const nextParts: Record<string, unknown>[] = []
+    let firstThoughtSignature: string | undefined
     for (const part of content.parts) {
-      if (isRecord(part) && typeof part.text === 'string' && part.thought !== true) {
+      if (!isRecord(part)) continue
+      if (firstThoughtSignature === undefined && typeof part.thoughtSignature === 'string') {
+        firstThoughtSignature = part.thoughtSignature
+      }
+      if (typeof part.text === 'string' && part.thought !== true) {
         const cleaned = sanitizeAntigravitySandboxText(part.text)
         if (cleaned !== part.text) {
           changed = true
-          if (cleaned.length > 0) nextParts.push({ ...part, text: cleaned })
+          if (cleaned.length > 0) {
+            nextParts.push({ ...part, text: cleaned })
+          }
         } else {
           nextParts.push(part)
         }
-      } else if (isRecord(part)) {
+      } else {
         nextParts.push(part)
       }
+    }
+    if (changed && nextParts.length === 0) {
+      nextParts.push({
+        text: ' ',
+        ...(firstThoughtSignature === undefined ? {} : { thoughtSignature: firstThoughtSignature }),
+      })
     }
     return changed ? { ...content, parts: nextParts } : content
   })
