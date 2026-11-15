@@ -3,7 +3,6 @@ node_modules/
 .pnpm-store/
 
 # Build artifacts
-lib/
 dist/
 build/*
 !build/client-bundle.ts

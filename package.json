@@ -12,11 +12,11 @@
   "author": "Jaylor-Wang",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Jaylor-Wang/dsh-tool-antigravity.git"
+    "url": "git+https://github.com/tom613951/dsh-tool-antigravity.git"
   },
-  "homepage": "https://github.com/Jaylor-Wang/dsh-tool-antigravity#readme",
+  "homepage": "https://github.com/tom613951/dsh-tool-antigravity#readme",
   "bugs": {
-    "url": "https://github.com/Jaylor-Wang/dsh-tool-antigravity/issues"
+    "url": "https://github.com/tom613951/dsh-tool-antigravity/issues"
   },
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -113,6 +113,12 @@
         "@deepseek-ai/dsh-client-locale"
       ],
       "platform": "web"
+    },
+    "install": {
+      "preferred": "tarball",
+      "tarball": "https://codeload.github.com/tom613951/dsh-tool-antigravity/tar.gz/refs/heads/main",
+      "zip": "https://codeload.github.com/tom613951/dsh-tool-antigravity/zip/refs/heads/main",
+      "git": "https://github.com/tom613951/dsh-tool-antigravity.git"
     }
   },
   "license": "MIT",
