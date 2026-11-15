@@ -1361,6 +1361,112 @@ describe('Antigravity LLM adapter', () => {
         thinkingLevel: 'MEDIUM',
       },
     })
+
+    await expect(adapter.resolveModel(ANTIGRAVITY_PROVIDER, 'antigravity-gemini-4-hydrogen')).resolves.toMatchObject({
+      id: 'antigravity-gemini-4-hydrogen',
+      defaultMaxTokens: 262144,
+      reasoning: {
+        defaultEffort: ReasoningEffortId('medium'),
+        efforts: [
+          { id: 'low', name: 'Low' },
+          { id: 'medium', name: 'Medium' },
+          { id: 'high', name: 'High' },
+          { id: 'xhigh', name: 'Extra' },
+        ],
+      },
+    })
+
+    const hydrogenXhighPayload = buildAntigravityGeneratePayload(
+      options({ model: 'antigravity-gemini-4-hydrogen', reasoningEffort: ReasoningEffortId('xhigh') }),
+      credential('access'),
+    )
+    expect(hydrogenXhighPayload.model).toBe('gemini-4-hydrogen-xhigh')
+    expect((hydrogenXhighPayload.request as { generationConfig: unknown }).generationConfig).toEqual({
+      maxOutputTokens: 262144,
+      thinkingConfig: {
+        includeThoughts: true,
+        thinkingLevel: 'XHIGH',
+      },
+    })
+
+    const hydrogenMediumPayload = buildAntigravityGeneratePayload(
+      options({ model: 'antigravity-gemini-4-hydrogen' }),
+      credential('access'),
+    )
+    expect(hydrogenMediumPayload.model).toBe('gemini-4-hydrogen-medium')
+    expect((hydrogenMediumPayload.request as { generationConfig: unknown }).generationConfig).toEqual({
+      maxOutputTokens: 262144,
+      thinkingConfig: {
+        includeThoughts: true,
+        thinkingLevel: 'MEDIUM',
+      },
+    })
+  })
+
+  it('filters out disabled models and models ending in -disabled from the live catalog', async () => {
+    const transport = {
+      request: vi.fn(async () => new Response(JSON.stringify({
+        models: {
+          'gemini-4-argon': { displayName: 'Gemini 4 Argon' },
+          'gemini-4-carbon-disabled': { displayName: 'Gemini 4 Carbon Disabled' },
+          'gemini-4-hydrogen': { displayName: 'Gemini 4 Hydrogen', disabled: true },
+        },
+      }))),
+    }
+    const adapter = new AntigravityAdapter({ auth: { credential: vi.fn(async () => credential('access')) }, transport })
+    const models = await adapter.listModels(ANTIGRAVITY_PROVIDER)
+    expect(models.map(m => m.id)).toEqual(['antigravity-gemini-4-argon'])
+  })
+
+  it('isolates account cache by credential token hash when lineage or email are omitted', async () => {
+    let token = 'token-1'
+    let requestCount = 0
+    const transport = {
+      request: vi.fn(async () => {
+        requestCount += 1
+        return liveCatalog()
+      }),
+    }
+    const adapter = new AntigravityAdapter({
+      auth: {
+        credential: vi.fn(async () => ({
+          accessToken: token,
+          projectId: 'aicode-consumers',
+        })),
+      },
+      transport,
+    })
+
+    await adapter.listModels(ANTIGRAVITY_PROVIDER)
+    expect(requestCount).toBe(1)
+
+    // Same token hits cache
+    await adapter.listModels(ANTIGRAVITY_PROVIDER)
+    expect(requestCount).toBe(1)
+
+    // Different token for same projectId fetches fresh
+    token = 'token-2'
+    await adapter.listModels(ANTIGRAVITY_PROVIDER)
+    expect(requestCount).toBe(2)
+  })
+
+  it('sanitizes sensitive unrestricted sandbox markers in Gemini system instructions and contents', () => {
+    const rawOptions = options({
+      model: 'antigravity-gemini-4-hydrogen',
+      system: '[MODE: UNRESTRICTED SANDBOX]\nYou are a helpful coding assistant.',
+      messages: [
+        {
+          id: 'm1' as never,
+          role: 'user',
+          content: [{ type: 'text', text: '[MODE: UNRESTRICTED SANDBOX] Please explain how this works.' }],
+          source: { kind: 'user' },
+        },
+      ],
+    })
+    const payload = buildAntigravityGeneratePayload(rawOptions, credential('access'))
+    const request = payload.request as { systemInstruction: { parts: { text: string }[] }; contents: { parts: { text: string }[] }[] }
+    expect(request.systemInstruction.parts[0]?.text).toBe('You are a helpful coding assistant.')
+    expect(request.contents[0]?.parts[0]?.text).toBe('Please explain how this works.')
   })
 
   it('isolates live model discovery cache per account and supports selective invalidation', async () => {

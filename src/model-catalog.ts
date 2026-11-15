@@ -25,4 +25,6 @@ export interface AntigravityModelCatalogView {
 export interface AntigravityModelCatalogService {
   catalogSnapshot(): AntigravityModelCatalogView
   modelCatalog(signal?: AbortSignal, forceRefresh?: boolean): Promise<AntigravityModelCatalogView>
+  invalidateModelCatalog?(accountKey?: string): void
+  readonly catalogView?: AntigravityModelCatalogView
 }

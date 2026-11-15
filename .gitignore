@@ -5,7 +5,8 @@ node_modules/
 # Build artifacts
 lib/
 dist/
-build/
+build/*
+!build/client-bundle.ts
 *.tsbuildinfo
 
 # Logs & Runtime

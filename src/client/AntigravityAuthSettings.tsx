@@ -501,7 +501,7 @@ function QuotaVisualDashboard({
               ? (t('gemini4GroupTitle') || 'GEMINI 4 MODELS')
               : group.group === 'gemini' ? t('geminiGroupTitle') : t('claudeGptGroupTitle')
             const groupDesc = (group.group === 'gemini-4' || group.group === 'gemini-argon')
-              ? (t('gemini4GroupDesc') || 'Models within this group: Gemini 4 Argon')
+              ? (t('gemini4GroupDesc') || 'Models within this group: Gemini 4 Argon, Gemini 4 Carbon, Gemini 4 Hydrogen')
               : group.group === 'gemini' ? t('geminiGroupDesc') : t('claudeGptGroupDesc')
             return (
               <div key={group.group} className="agy-quota-group">

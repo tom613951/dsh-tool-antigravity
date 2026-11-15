@@ -1,6 +1,7 @@
 /** Public DSH LLM adapter for the single Antigravity provider route. */
 
 import { Buffer } from 'node:buffer'
+import { createHash } from 'node:crypto'
 import {
   AgyRequestSessionStore,
   CLAUDE_DESCRIPTION_PROMPT,
@@ -150,12 +151,12 @@ export class AntigravityAdapter extends LlmAdapter {
   private readonly options: Required<Pick<AntigravityAdapterOptions, 'idleTimeoutMs' | 'totalTimeoutMs' | 'maxResponseBytes' | 'maxFrameBytes'>> & {
     readonly responseHeaderTimeoutMs: number
   }
-  private readonly definitions = getPublicModelDefinitions()
+  private readonly definitions = getExtendedModelDefinitions()
   private catalogProjectId: string | undefined
   private catalogExpiresAt = 0
   private catalogModelIds = new Set<string>()
   private catalogFailureCode: string | undefined
-  private catalogView: AntigravityModelCatalogView
+  catalogView: AntigravityModelCatalogView
   private readonly catalogByAccount = new Map<string, { expiresAt: number; modelIds: ReadonlySet<string>; failureCode?: string | undefined }>()
   private readonly lastLiveByAccount = new Map<string, ReadonlySet<string>>()
 
@@ -500,12 +501,7 @@ export class AntigravityAdapter extends LlmAdapter {
   ): Promise<ReadonlySet<string>> {
     const credential = await this.readCredential(signal, forceCredentialRefresh)
     if (credential === undefined) throw new LlmError('Antigravity login is required before model discovery', 'AUTH')
-    const credAny = credential as unknown as Record<string, unknown>
-    const accountKey = (typeof credAny.lineage === 'string' && credAny.lineage)
-      || (typeof credAny.email === 'string' && credAny.email)
-      || (typeof credAny.id === 'string' && credAny.id)
-      || credential.projectId
-      || 'default'
+    const accountKey = accountKeyForCredential(credential)
     const cached = this.catalogByAccount.get(accountKey)
     if (!bypassCache && cached !== undefined && Date.now() < cached.expiresAt) {
       if (cached.failureCode !== undefined) throw new LlmError('The Antigravity live model catalog refresh remains unavailable', cached.failureCode)
@@ -647,12 +643,71 @@ export class AntigravityAdapter extends LlmAdapter {
   }
 }
 
+function accountKeyForCredential(credential: HostCredential): string {
+  const credAny = credential as unknown as Record<string, unknown>
+  const explicit = (typeof credAny.lineage === 'string' && credAny.lineage)
+    || (typeof credAny.email === 'string' && credAny.email)
+    || (typeof credAny.id === 'string' && credAny.id)
+  if (explicit) return explicit
+  const token = (typeof credAny.refreshToken === 'string' && credAny.refreshToken)
+    || (typeof credAny.accessToken === 'string' && credAny.accessToken)
+  if (token) {
+    const fp = createHash('sha256').update(token).digest('hex').slice(0, 16)
+    return credential.projectId ? `${credential.projectId}:${fp}` : fp
+  }
+  return credential.projectId || 'default'
+}
+
+export function getExtendedModelDefinitions(): ReturnType<typeof getPublicModelDefinitions> {
+  const base = getPublicModelDefinitions()
+  const extended = { ...base }
+  if (!extended['antigravity-gemini-4-hydrogen']) {
+    extended['antigravity-gemini-4-hydrogen'] = {
+      id: 'antigravity-gemini-4-hydrogen',
+      name: 'Gemini 4 Hydrogen (Antigravity)',
+      release_date: '',
+      attachment: true,
+      temperature: true,
+      tool_call: true,
+      cost: { input: 0, output: 0 },
+      options: {},
+      reasoning: true,
+      limit: {
+        context: 1048576,
+        output: 262144,
+      },
+      modalities: {
+        input: ['text', 'image', 'pdf'],
+        output: ['text'],
+      },
+      variants: {
+        low: { thinkingLevel: 'low' },
+        medium: { thinkingLevel: 'medium' },
+        high: { thinkingLevel: 'high' },
+        xhigh: { thinkingLevel: 'xhigh' as unknown as import('@cortexkit/antigravity-auth-core').ModelThinkingLevel },
+      },
+    }
+  }
+  return extended
+}
+
 function cleanModelDisplayName(name: string): string {
   return name.replace(/\s*\([^)]*\)\s*$/u, '').trim()
 }
 
 function getModelReasoningEfforts(modelId: string): { efforts: readonly { id: ReturnType<typeof ReasoningEffortId>; name: string }[]; defaultEffort: ReturnType<typeof ReasoningEffortId> } | undefined {
   const lower = modelId.toLowerCase()
+  if (lower.includes('gemini-4-hydrogen')) {
+    return {
+      efforts: [
+        { id: ReasoningEffortId('low'), name: 'Low' },
+        { id: ReasoningEffortId('medium'), name: 'Medium' },
+        { id: ReasoningEffortId('high'), name: 'High' },
+        { id: ReasoningEffortId('xhigh'), name: 'Extra' },
+      ],
+      defaultEffort: ReasoningEffortId('medium'),
+    }
+  }
   if (lower.includes('gemini-4-argon') || lower.includes('gemini-4-carbon') || (lower.includes('flash') && !lower.includes('image'))) {
     return {
       efforts: [
@@ -665,7 +720,7 @@ function getModelReasoningEfforts(modelId: string): { efforts: readonly { id: Re
       ),
     }
   }
-  if (lower.includes('claude-sonnet-5-5') || lower.includes('claude-opus-5-5')) {
+  if (lower.includes('claude-sonnet-5-5') || lower.includes('claude-opus-5-5') || lower.includes('claude-sonnet-4-6') || lower.includes('claude-opus-4-6')) {
     return {
       efforts: [
         { id: ReasoningEffortId('low'), name: 'Low' },
@@ -679,7 +734,7 @@ function getModelReasoningEfforts(modelId: string): { efforts: readonly { id: Re
 }
 
 function createCatalogView(
-  definitions: ReturnType<typeof getPublicModelDefinitions>,
+  definitions: ReturnType<typeof getExtendedModelDefinitions>,
   state: AntigravityModelCatalogState,
   available?: ReadonlySet<string>,
   checkedAt?: string,
@@ -706,7 +761,7 @@ function cloneCatalogView(value: AntigravityModelCatalogView): AntigravityModelC
 
 function parseLiveModelIds(
   value: unknown,
-  definitions: ReturnType<typeof getPublicModelDefinitions>,
+  definitions: ReturnType<typeof getExtendedModelDefinitions>,
 ): Set<string> {
   const root = isRecord(value) && isRecord(value.response) ? value.response : value
   if (!isRecord(root) || !isRecord(root.models)) throw new LlmError('The Antigravity live model catalog did not match the audited schema', 'PROTOCOL_DRIFT')
@@ -716,7 +771,13 @@ function parseLiveModelIds(
   const live = new Set<string>()
   for (const [id, rawEntry] of entries) {
     if (!safeModelId(id) || !isRecord(rawEntry)) throw new LlmError('The Antigravity live model catalog did not match the audited schema', 'PROTOCOL_DRIFT')
+    if (rawEntry.disabled === true || id.endsWith('-disabled')) {
+      continue
+    }
     const cleanId = cleanModelId(id)
+    if (cleanId.endsWith('-disabled')) {
+      continue
+    }
     live.add(canonicalWireModel(cleanId, aliases))
     live.add(cleanId)
     live.add(id)
@@ -743,6 +804,26 @@ function parseLiveModelIds(
       live.add('gemini-4-carbon-low')
       live.add('gemini-4-carbon-medium')
       live.add('gemini-4-carbon-high')
+    }
+    if (cleanId.startsWith('gemini-4-hydrogen')) {
+      live.add('gemini-4-hydrogen')
+      live.add('gemini-4-hydrogen-low')
+      live.add('gemini-4-hydrogen-medium')
+      live.add('gemini-4-hydrogen-high')
+      live.add('gemini-4-hydrogen-xhigh')
+    }
+    if (cleanId.startsWith('claude-sonnet-4-6')) {
+      live.add('claude-sonnet-4-6')
+      live.add('claude-sonnet-4-6-low')
+      live.add('claude-sonnet-4-6-medium')
+      live.add('claude-sonnet-4-6-high')
+    }
+    if (cleanId.startsWith('claude-opus-4-6')) {
+      live.add('claude-opus-4-6')
+      live.add('claude-opus-4-6-thinking')
+      live.add('claude-opus-4-6-low')
+      live.add('claude-opus-4-6-medium')
+      live.add('claude-opus-4-6-high')
     }
     if (cleanId.startsWith('claude-sonnet-5-5')) {
       live.add('claude-sonnet-5-5')
@@ -776,6 +857,13 @@ function parseLiveModelIds(
       || live.has(cleanResolved)
       || live.has(resolved)
       || live.has(definition.id)
+      || (definition.id === 'antigravity-gemini-4-hydrogen' && (
+        live.has('gemini-4-hydrogen')
+        || live.has('gemini-4-hydrogen-medium')
+        || live.has('gemini-4-hydrogen-low')
+        || live.has('gemini-4-hydrogen-high')
+        || live.has('gemini-4-hydrogen-xhigh')
+      ))
       || (definition.id === 'antigravity-gemini-3.5-flash' && (
         live.has('gemini-3-flash')
         || live.has('gemini-3-flash-agent')
@@ -1078,6 +1166,37 @@ function groupClaudeFunctionResponses(
   return grouped
 }
 
+const SENSITIVE_SANDBOX_LINE_PATTERN = /^[ \t]*\[MODE:\s*UNRESTRICTED\s*SANDBOX[^\]]*\][ \t]*(?:\r?\n)*/gim
+const SENSITIVE_SANDBOX_INLINE_PATTERN = /\[MODE:\s*UNRESTRICTED\s*SANDBOX[^\]]*\]/gi
+
+function sanitizeAntigravitySandboxText(text: string): string {
+  if (!/\[MODE:\s*UNRESTRICTED\s*SANDBOX/iu.test(text)) return text
+  const cleaned = text.replace(SENSITIVE_SANDBOX_LINE_PATTERN, '').replace(SENSITIVE_SANDBOX_INLINE_PATTERN, '')
+  return cleaned.trim().length === 0 ? '' : cleaned
+}
+
+function sanitizeAntigravityContents(contents: readonly Record<string, unknown>[]): readonly Record<string, unknown>[] {
+  return contents.map(content => {
+    if (!isRecord(content) || !Array.isArray(content.parts)) return content
+    let changed = false
+    const nextParts: Record<string, unknown>[] = []
+    for (const part of content.parts) {
+      if (isRecord(part) && typeof part.text === 'string' && part.thought !== true) {
+        const cleaned = sanitizeAntigravitySandboxText(part.text)
+        if (cleaned !== part.text) {
+          changed = true
+          if (cleaned.length > 0) nextParts.push({ ...part, text: cleaned })
+        } else {
+          nextParts.push(part)
+        }
+      } else if (isRecord(part)) {
+        nextParts.push(part)
+      }
+    }
+    return changed ? { ...content, parts: nextParts } : content
+  })
+}
+
 function buildPayloadFromContents(
   options: GenerateOptions,
   credential: HostCredential,
@@ -1085,16 +1204,19 @@ function buildPayloadFromContents(
 ): Record<string, unknown> {
   const wireModel = resolveWireModel(options.model, options.reasoningEffort)
   const usesCapturedGemini38ThinkingBudget = /^gemini-3\.8-flash-(?:low|medium|high)$/u.test(wireModel)
-  const requestContents = groupClaudeFunctionResponses(contents, options.model)
+  const requestContents = sanitizeAntigravityContents(groupClaudeFunctionResponses(contents, options.model))
   const request: Record<string, unknown> = { contents: requestContents }
   // V3 AgentLoop stores instructions in system messages. One-shot callers may
   // still provide a separate preface; preserve both in their original order.
-  const systemParts = [
+  const rawSystemParts = [
     ...(options.system?.trim() ? [{ text: options.system }] : []),
     ...options.messages.flatMap(message => message.role === 'system'
       ? message.content.flatMap(block => block.type === 'text' && block.text.trim() ? [{ text: block.text }] : [])
       : []),
   ]
+  const systemParts = rawSystemParts
+    .map(part => typeof part.text === 'string' ? { ...part, text: sanitizeAntigravitySandboxText(part.text) } : part)
+    .filter(part => typeof part.text !== 'string' || part.text.trim().length > 0)
   if (systemParts.length > 0) request.systemInstruction = { parts: systemParts }
   const generationConfig: Record<string, unknown> = {}
   if (options.maxTokens !== undefined) generationConfig.maxOutputTokens = boundedInteger(options.maxTokens, 1, 1_000_000, 'maxTokens')
@@ -1110,11 +1232,14 @@ function buildPayloadFromContents(
   const tieredModel = resolveModelForTier(options.model, options.reasoningEffort)
   const resolved = resolveModelWithTier(usesCapturedGemini38ThinkingBudget ? wireModel : tieredModel)
   const nativeModel = getAgyNativeModel(wireModel)
-  const usesAdaptiveNativeThinking = isGeminiArgonModel(wireModel) || isGeminiCarbonModel(wireModel) || nativeModel?.supportsAdaptiveThinking === true
-  const usesNumericGeminiThinkingBudget = !wireModel.toLowerCase().includes('claude') && !usesAdaptiveNativeThinking && typeof resolved.thinkingBudget === 'number'
+  const lowerWire = wireModel.toLowerCase()
+  const isGeminiHydrogen = lowerWire.includes('gemini-4-hydrogen')
+  const isClaude46 = lowerWire.includes('claude-sonnet-4-6') || lowerWire.includes('claude-opus-4-6')
+  const usesAdaptiveNativeThinking = isGeminiArgonModel(wireModel) || isGeminiCarbonModel(wireModel) || isGeminiHydrogen || nativeModel?.supportsAdaptiveThinking === true
+  const usesNumericGeminiThinkingBudget = !lowerWire.includes('claude') && !usesAdaptiveNativeThinking && typeof resolved.thinkingBudget === 'number'
   const requestedEffort = normalizeReasoningEffort(options.reasoningEffort)
   const thinkingLevel = requestedEffort ?? resolved.thinkingLevel
-  if (wireModel.toLowerCase().includes('claude')) {
+  if (lowerWire.includes('claude')) {
     applyClaudeToolHardening(request)
     applyClaudeTransforms(request, {
       model: wireModel,
@@ -1126,15 +1251,36 @@ function buildPayloadFromContents(
       const transformedConfig = isRecord(request.generationConfig) ? request.generationConfig : {}
       applyAgyNativeGenerationConfig(wireModel, transformedConfig)
       request.generationConfig = transformedConfig
+    } else if (isClaude46) {
+      const transformedConfig = isRecord(request.generationConfig) ? request.generationConfig : {}
+      const effort = requestedEffort ?? 'low'
+      transformedConfig.thinkingConfig = {
+        includeThoughts: true,
+        thinkingBudget: effort === 'high' ? 8192 : effort === 'medium' ? 4096 : 1024,
+      }
+      if (transformedConfig.maxOutputTokens === undefined) transformedConfig.maxOutputTokens = 64000
+      request.generationConfig = transformedConfig
     }
   } else {
     applyGeminiTransforms(request, {
       model: wireModel,
-      ...(thinkingLevel === undefined || usesNumericGeminiThinkingBudget || usesAdaptiveNativeThinking ? {} : { tierThinkingLevel: thinkingLevel as 'low' | 'medium' | 'high' }),
+      ...(thinkingLevel === undefined || usesNumericGeminiThinkingBudget || usesAdaptiveNativeThinking ? {} : { tierThinkingLevel: (thinkingLevel === 'xhigh' ? 'high' : thinkingLevel) as 'low' | 'medium' | 'high' }),
       ...(resolved.thinkingBudget === undefined || usesAdaptiveNativeThinking ? {} : { tierThinkingBudget: resolved.thinkingBudget }),
       ...(usesAdaptiveNativeThinking || (options.reasoningEffort === undefined && resolved.thinkingBudget === undefined) ? {} : { normalizedThinking: { includeThoughts: true, ...(resolved.thinkingBudget === undefined ? {} : { thinkingBudget: resolved.thinkingBudget }) } }),
     })
-    if (usesAdaptiveNativeThinking) {
+    if (isGeminiHydrogen) {
+      const transformedConfig = isRecord(request.generationConfig) ? request.generationConfig : {}
+      if (options.maxTokens === undefined && transformedConfig.maxOutputTokens === undefined) {
+        transformedConfig.maxOutputTokens = 262144
+      }
+      const effort = requestedEffort ?? (wireModel.endsWith('-xhigh') ? 'xhigh' : wireModel.endsWith('-high') ? 'high' : wireModel.endsWith('-low') ? 'low' : 'medium')
+      const wireLevel = effort === 'xhigh' ? 'XHIGH' : effort === 'high' ? 'HIGH' : effort === 'low' || effort === 'minimal' ? 'LOW' : 'MEDIUM'
+      transformedConfig.thinkingConfig = {
+        includeThoughts: true,
+        thinkingLevel: wireLevel,
+      }
+      request.generationConfig = transformedConfig
+    } else if (usesAdaptiveNativeThinking) {
       const transformedConfig = isRecord(request.generationConfig) ? request.generationConfig : {}
       applyAgyNativeGenerationConfig(wireModel, transformedConfig)
       request.generationConfig = transformedConfig
@@ -1536,30 +1682,42 @@ function requireToolCallId(value: unknown): string {
   return value
 }
 
-function normalizeReasoningEffort(value: GenerateOptions['reasoningEffort']): 'low' | 'medium' | 'high' | undefined {
+function normalizeReasoningEffort(value: GenerateOptions['reasoningEffort']): 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | undefined {
   if (value === undefined) return undefined
   const normalized = String(value).toLowerCase()
-  if (normalized === 'minimal' || normalized === 'low') return 'low'
+  if (normalized === 'minimal') return 'minimal'
+  if (normalized === 'low') return 'low'
   if (normalized === 'medium') return 'medium'
   if (normalized === 'high') return 'high'
+  if (normalized === 'xhigh' || normalized === 'extra') return 'xhigh'
   return undefined
 }
 
 function resolveModelForTier(model: string, reasoningEffort?: GenerateOptions['reasoningEffort']): string {
   const effort = normalizeReasoningEffort(reasoningEffort)
-  if (effort === undefined || /-(?:minimal|low|medium|high)$/iu.test(model)) return model
+  if (effort === undefined || /-(?:minimal|low|medium|high|xhigh)$/iu.test(model)) return model
+  if (/^(?:antigravity-)?gemini-4-hydrogen$/iu.test(model)) {
+    return `${model}-${effort === 'minimal' ? 'low' : effort}`
+  }
+  const clamped = effort === 'minimal' ? 'low' : effort === 'xhigh' ? 'high' : effort
   if (
     /^(?:antigravity-)?gemini-3\.[58]-flash$/iu.test(model)
     || /^(?:antigravity-)?gemini-4-(?:argon|carbon)$/iu.test(model)
     || /^(?:antigravity-)?claude-(?:opus|sonnet)-5-5$/iu.test(model)
   ) {
-    return `${model}-${effort}`
+    return `${model}-${clamped}`
   }
   return model
 }
 
 function resolveWireModel(model: string, reasoningEffort?: GenerateOptions['reasoningEffort']): string {
   const routeModel = resolveModelForTier(model, reasoningEffort)
+  if (/^(?:antigravity-)?gemini-4-hydrogen-(?:low|medium|high|xhigh)$/iu.test(routeModel)) {
+    return routeModel.replace(/^antigravity-/iu, '')
+  }
+  if (/^(?:antigravity-)?gemini-4-hydrogen$/iu.test(routeModel)) {
+    return `${routeModel.replace(/^antigravity-/iu, '')}-medium`
+  }
   return resolveModelWithTier(routeModel).actualModel
 }
 

@@ -46,6 +46,23 @@ describe('Antigravity quota', () => {
     })
   })
 
+  it('identifies gemini-4 carbon and hydrogen quota groups correctly', () => {
+    const result = normalizeQuotaResponse({
+      groups: [
+        {
+          displayName: 'Gemini 4 Hydrogen',
+          buckets: [{ bucketId: 'hydrogen-5h', window: '5h', remainingFraction: 0.9, resetTime: reset }],
+        },
+      ],
+    }, Date.parse('2029-01-01T00:00:00.000Z'))
+    expect(result).toMatchObject({
+      state: 'available',
+      groups: [
+        { group: 'gemini-4', modelCount: 0, windows: [{ window: '5h', remainingFraction: 0.9, resetTime: reset }] },
+      ],
+    })
+  })
+
   it('coalesces refreshes, enforces the minimum interval, and keeps errors value-safe', async () => {
     const now = vi.fn(() => 1_900_000_000_000)
     const request = vi.fn(async input => {

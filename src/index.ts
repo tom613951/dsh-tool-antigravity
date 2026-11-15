@@ -67,12 +67,62 @@ export function apply(ctx: Context, config: AntigravityAuthConfig = {}): void {
   })
   const contextWithProvide = ctx as Context & { provide?: (name: string, value: unknown) => () => Promise<void> | void }
   const unprovide = contextWithProvide.provide?.('antigravityAuth', service) ?? (() => {})
+  let lastCatalogStateKey: string | undefined
+  let catalogWatchSeq = 0
+  const emitCatalogUpdated = () => {
+    (ctx as unknown as { emit?: (event: string, ...args: unknown[]) => void }).emit?.('llm/models-updated', ANTIGRAVITY_PROVIDER)
+    if (typeof (runtime as { llm?: { emitAdaptersUpdated?: () => void } }).llm?.emitAdaptersUpdated === 'function') {
+      (runtime as { llm?: { emitAdaptersUpdated?: () => void } }).llm?.emitAdaptersUpdated?.()
+    } else {
+      (ctx as unknown as { emit?: (event: string, ...args: unknown[]) => void }).emit?.('llm/adapters-updated')
+    }
+  }
+  const notifyModelsUpdatedNow = () => {
+    adapter.invalidateModelCatalog()
+    emitCatalogUpdated()
+    void syncCatalogState(false, true)
+  }
+  const syncCatalogState = async (initial = false, syncOnly = false) => {
+    const seq = ++catalogWatchSeq
+    try {
+      const status = await service.status()
+      if (seq !== catalogWatchSeq) return
+      const activeId = status.accounts.find(account => account.active)?.id ?? ''
+      const ready = status.login.projectAvailable && status.capabilities.some(capability => capability.id === 'auth-llm' && capability.state === 'available')
+      const nextKey = `${activeId}|${status.accounts.map(account => account.id).join(',')}|${String(status.login.projectAvailable)}|${String(ready)}`
+      if (syncOnly || initial || lastCatalogStateKey === undefined) {
+        lastCatalogStateKey = nextKey
+        return
+      }
+      if (nextKey !== lastCatalogStateKey) {
+        lastCatalogStateKey = nextKey
+        adapter.invalidateModelCatalog()
+        emitCatalogUpdated()
+      }
+    } catch {}
+  }
+  const unwatchCatalog = service.watchStatus?.(() => {
+    void syncCatalogState(false, false)
+  }) ?? (() => {})
+  void syncCatalogState(true, false)
+  ctx.effect?.(() => () => {
+    catalogWatchSeq += 1
+    unwatchCatalog()
+  })
   ctx.inject(['connection'], (connectionCtx) => {
     const webServer = connectionCtx.get('webServer')
     accountMode = commandAccountMode(webServer)
     const guard = createLoopbackRpcGuard(
       webServer?.host,
-      (endpoint, payload, signal) => handleAntigravityAuthRpc(service, endpoint, payload, signal, adapter),
+      (endpoint, payload, signal) => handleAntigravityAuthRpc(
+        service,
+        endpoint,
+        payload,
+        signal,
+        adapter,
+        notifyModelsUpdatedNow,
+        emitCatalogUpdated,
+      ),
     )
     if (guard.mode === 'blocked') {
       connectionCtx.logger.warn('antigravity-auth: account RPC is disabled because the WebServer is not loopback-bound')

@@ -22,6 +22,8 @@ export async function handleAntigravityAuthRpc(
   payload: unknown,
   signal?: AbortSignal,
   modelCatalog?: AntigravityModelCatalogService,
+  onModelsChanged?: () => void,
+  onCatalogRefreshed?: () => void,
 ): Promise<RpcResult<unknown>> {
   if (signal?.aborted === true) return cancelled()
 
@@ -33,22 +35,36 @@ export async function handleAntigravityAuthRpc(
     if (endpoint === 'select-account') {
       if (!isAccountHandlePayload(payload)) return badRequest('select-account expects { id: string }')
       if (service.selectAccount === undefined) return badRequest('account selection is unavailable')
-      return { ok: true, value: await service.selectAccount(payload.id) }
+      const value = await service.selectAccount(payload.id)
+      if (value.state === 'selected') {
+        modelCatalog?.invalidateModelCatalog?.()
+        onModelsChanged?.()
+      }
+      return { ok: true, value }
     }
     if (endpoint === 'remove-account') {
       if (!isAccountHandlePayload(payload)) return badRequest('remove-account expects { id: string }')
       if (service.removeAccount === undefined) return badRequest('account removal is unavailable')
-      return { ok: true, value: await service.removeAccount(payload.id) }
+      const value = await service.removeAccount(payload.id)
+      if (value.state === 'removed') {
+        modelCatalog?.invalidateModelCatalog?.()
+        onModelsChanged?.()
+      }
+      return { ok: true, value }
     }
     if (endpoint === 'models') {
       if (!isRefreshPayload(payload)) return badRequest('models expects {} or { force: boolean }')
       if (modelCatalog === undefined) return badRequest('model catalog is unavailable')
+      const beforeSig = (modelCatalog.catalogView?.models ?? []).map((m: { id: string; state: string }) => `${m.id}:${m.state}`).join(',')
       const status = await service.status()
       const gateReady = status.login.projectAvailable
         && status.capabilities.some(capability => capability.id === 'auth-llm' && capability.state === 'available')
-      return { ok: true, value: gateReady
+      const value = gateReady
         ? await modelCatalog.modelCatalog(signal, payload.force)
-        : modelCatalog.catalogSnapshot() }
+        : modelCatalog.catalogSnapshot()
+      const afterSig = (value.models ?? []).map(m => `${m.id}:${m.state}`).join(',')
+      if (payload.force === true || afterSig !== beforeSig) onCatalogRefreshed?.()
+      return { ok: true, value }
     }
     if (endpoint === 'usage') {
       if (!isRefreshPayload(payload)) return badRequest('usage expects {} or { force: boolean }')
@@ -69,11 +85,17 @@ export async function handleAntigravityAuthRpc(
     }
     if (endpoint === 'logout') {
       if (!isEmptyRecord(payload)) return badRequest('logout expects an empty payload')
-      return { ok: true, value: await service.logout() }
+      const value = await service.logout()
+      modelCatalog?.invalidateModelCatalog?.()
+      onModelsChanged?.()
+      return { ok: true, value }
     }
     if (endpoint === 'revoke') {
       if (!isRevokePayload(payload)) return badRequest('revoke expects { confirmed: true }')
-      return { ok: true, value: await service.revoke(true, signal) }
+      const value = await service.revoke(true, signal)
+      modelCatalog?.invalidateModelCatalog?.()
+      onModelsChanged?.()
+      return { ok: true, value }
     }
     if (endpoint === 'get-proxy') {
       return { ok: true, value: { proxy: getStoredProxy() } }

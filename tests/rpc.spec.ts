@@ -424,4 +424,42 @@ describe('Antigravity login RPC', () => {
       await rm(tempDir, { recursive: true, force: true })
     }
   })
+
+  it('triggers onModelsChanged and onCatalogRefreshed callbacks on account switch and force refresh', async () => {
+    const onModelsChanged = vi.fn()
+    const onCatalogRefreshed = vi.fn()
+    const invalidate = vi.fn()
+    const modelCatalog = {
+      catalogSnapshot: () => ({ state: 'snapshot' as const, models: [] }),
+      modelCatalog: async () => ({ state: 'live-available' as const, models: [] }),
+      invalidateModelCatalog: invalidate,
+      catalogView: { state: 'snapshot' as const, models: [] },
+    }
+    const service = createBootstrapStatusService()
+    service.selectAccount = vi.fn(async () => ({ state: 'selected' as const }))
+    const selectRes = await handleAntigravityAuthRpc(
+      service,
+      'select-account',
+      { id: 'acc-1' },
+      undefined,
+      modelCatalog,
+      onModelsChanged,
+      onCatalogRefreshed,
+    )
+    expect(selectRes).toEqual({ ok: true, value: { state: 'selected' } })
+    expect(invalidate).toHaveBeenCalledOnce()
+    expect(onModelsChanged).toHaveBeenCalledOnce()
+
+    const modelsRes = await handleAntigravityAuthRpc(
+      service,
+      'models',
+      { force: true },
+      undefined,
+      modelCatalog,
+      onModelsChanged,
+      onCatalogRefreshed,
+    )
+    expect(modelsRes.ok).toBe(true)
+    expect(onCatalogRefreshed).toHaveBeenCalledOnce()
+  })
 })

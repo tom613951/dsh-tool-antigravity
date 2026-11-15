@@ -302,6 +302,7 @@ export class AntigravityAuthService implements BootstrapStatusService {
     // Selecting is a cursor move, not a credential write: the account must not be woken
     // from a cooldown, because it has not proven it can serve a request yet.
     await pool.setActive(lineage)
+    this.activeFamily = undefined
     this.credentials.invalidateCache()
     this.quota.invalidate?.()
     this.notifyStatus()
@@ -322,6 +323,7 @@ export class AntigravityAuthService implements BootstrapStatusService {
     if (lineage === undefined) return { state: 'unknown-account' }
     const removed = await pool.removeAccount(lineage)
     if (!removed) return { state: 'unknown-account' }
+    this.activeFamily = undefined
     this.credentials.invalidateCache()
     this.quota.invalidate?.()
     this.notifyStatus()
@@ -388,6 +390,7 @@ export class AntigravityAuthService implements BootstrapStatusService {
   async logout(): Promise<import('./credential-coordinator.ts').LogoutResult> {
     if (this.disposed) throw new OAuthFlowError('internal', 'The Antigravity login is unavailable')
     this.activeFlowGeneration = 0
+    this.activeFamily = undefined
     await this.flow.cancel()
     try {
       const result = await this.credentials.logout()
@@ -402,6 +405,7 @@ export class AntigravityAuthService implements BootstrapStatusService {
 
   async revoke(confirmed: boolean, signal?: AbortSignal): Promise<import('./credential-coordinator.ts').RevokeActionResult> {
     if (this.disposed) throw new OAuthFlowError('internal', 'The Antigravity login is unavailable')
+    this.activeFamily = undefined
     const result = await this.credentials.revoke(confirmed, signal)
     if (result.state === 'revoked' || result.state === 'logged-out' || result.state === 'superseded') {
       this.quota.invalidate?.()
