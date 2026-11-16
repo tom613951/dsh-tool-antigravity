@@ -95,6 +95,7 @@ export declare class AntigravityAuthService implements BootstrapStatusService {
         readonly status?: number | undefined;
         readonly retryAfterMs?: number | null;
         readonly family?: string | undefined;
+        readonly lineage?: string | undefined;
     }): Promise<('rotate' | 'stay' | 'relogin' | 'exhausted')>;
     /**
      * Make a pooled account the one the next request resolves to.
@@ -121,7 +122,9 @@ export declare class AntigravityAuthService implements BootstrapStatusService {
     credential(signal?: AbortSignal, options?: {
         readonly forceRefresh?: boolean;
         readonly family?: string;
-    }): Promise<HostCredential | undefined>;
+    }): Promise<(HostCredential & {
+        readonly lineage?: string;
+    }) | undefined>;
     usage(signal?: AbortSignal, force?: boolean): Promise<import('./quota.ts').QuotaStatusView>;
     logout(): Promise<import('./credential-coordinator.ts').LogoutResult>;
     revoke(confirmed: boolean, signal?: AbortSignal): Promise<import('./credential-coordinator.ts').RevokeActionResult>;

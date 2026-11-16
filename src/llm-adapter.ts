@@ -87,13 +87,14 @@ const MAX_PROVIDER_ERROR_JSON_DEPTH = 8
 const MAX_PROVIDER_PARTS = 4096
 
 export interface AntigravityAuthCredentialSource {
-  credential(signal?: AbortSignal, options?: { readonly forceRefresh?: boolean; readonly family?: string }): Promise<HostCredential | undefined>
+  credential(signal?: AbortSignal, options?: { readonly forceRefresh?: boolean; readonly family?: string }): Promise<(HostCredential & { readonly lineage?: string }) | undefined>
   rotateOnFailure?(failure: {
     readonly reason?: string | undefined
     readonly message?: string | undefined
     readonly status?: number | undefined
     readonly retryAfterMs?: number | null
     readonly family?: string | undefined
+    readonly lineage?: string | undefined
   }): Promise<('rotate' | 'stay' | 'relogin' | 'exhausted')>
   accountCount?(): Promise<number>
 }
@@ -350,7 +351,7 @@ export class AntigravityAdapter extends LlmAdapter {
         }
         if (statusError.code === 'rate-limited' && !hasEmitted.value && !isAborted(signal) && rotationAttempts < maxRotations) {
           await cancelResponse(response)
-          const rotated = await this.tryRotate(family, response.status, 'rate-limited')
+          const rotated = await this.tryRotate(family, response.status, 'rate-limited', credential.lineage)
           if (rotated) {
             rotationAttempts += 1
             continue
@@ -386,7 +387,7 @@ export class AntigravityAdapter extends LlmAdapter {
           continue
         }
         if (privateError?.code === 'rate-limited' && !hasEmitted.value && !isAborted(signal) && rotationAttempts < maxRotations) {
-          const rotated = await this.tryRotate(family, privateError.status ?? 429, 'rate-limited')
+          const rotated = await this.tryRotate(family, privateError.status ?? 429, 'rate-limited', credential.lineage)
           if (rotated) {
             rotationAttempts += 1
             continue
@@ -605,7 +606,7 @@ export class AntigravityAdapter extends LlmAdapter {
     })
   }
 
-  private async readCredential(signal: AbortSignal | undefined, forceRefresh: boolean, family?: string): Promise<HostCredential | undefined> {
+  private async readCredential(signal: AbortSignal | undefined, forceRefresh: boolean, family?: string): Promise<(HostCredential & { readonly lineage?: string }) | undefined> {
     try {
       return await this.adapterOptions.auth.credential(signal, {
         ...(forceRefresh ? { forceRefresh: true } : {}),
@@ -627,11 +628,11 @@ export class AntigravityAdapter extends LlmAdapter {
     }
   }
 
-  private async tryRotate(family: string, status = 429, message = 'rate-limited'): Promise<boolean> {
+  private async tryRotate(family: string, status = 429, message = 'rate-limited', lineage?: string): Promise<boolean> {
     const auth = this.adapterOptions.auth as AntigravityAuthCredentialSource
     if (typeof auth.rotateOnFailure !== 'function') return false
     try {
-      const decision = await auth.rotateOnFailure({ status, family, message })
+      const decision = await auth.rotateOnFailure({ status, family, message, lineage })
       if (decision === 'rotate') {
         this.invalidateModelCatalog()
         return true

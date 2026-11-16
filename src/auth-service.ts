@@ -258,18 +258,21 @@ export class AntigravityAuthService implements BootstrapStatusService {
     readonly status?: number | undefined
     readonly retryAfterMs?: number | null
     readonly family?: string | undefined
+    readonly lineage?: string | undefined
   }): Promise<('rotate' | 'stay' | 'relogin' | 'exhausted')> {
     if (failure.family !== undefined) {
       this.activeFamily = failure.family
     }
-    const record = await this.readRecord()
-    if (record === undefined) return 'relogin'
     const pool = this.accounts
     if (pool === undefined) {
+      const record = await this.readRecord()
+      if (record === undefined) return 'relogin'
       const decision = decideRotation({ ...failure, consecutiveFailures: 0 })
       return decision.action
     }
-    const current = (await pool.readPool()).accounts.find(account => account.lineage === record.lineage)
+    const poolData = await pool.readPool()
+    const targetLineage = failure.lineage ?? (await this.readRecord())?.lineage
+    const current = poolData.accounts.find(account => account.lineage === targetLineage)
     const decision = decideRotation({
       ...failure,
       // Age out a stale streak: a failure hours after the last one is a fresh start, so the
@@ -277,8 +280,8 @@ export class AntigravityAuthService implements BootstrapStatusService {
       consecutiveFailures: current === undefined ? 0 : effectiveFailureCount(current, Date.now()),
     })
     if (decision.action !== 'rotate') return decision.action
-    if (record.lineage !== undefined) {
-      await pool.markCooldown(record.lineage, decision.cooldownMs, failure.family)
+    if (targetLineage !== undefined) {
+      await pool.markCooldown(targetLineage, decision.cooldownMs, failure.family)
     }
     this.credentials.invalidateCache()
     this.quota.invalidate?.()
@@ -376,11 +379,14 @@ export class AntigravityAuthService implements BootstrapStatusService {
     }
   }
 
-  async credential(signal?: AbortSignal, options?: { readonly forceRefresh?: boolean; readonly family?: string }): Promise<HostCredential | undefined> {
+  async credential(signal?: AbortSignal, options?: { readonly forceRefresh?: boolean; readonly family?: string }): Promise<(HostCredential & { readonly lineage?: string }) | undefined> {
     if (options?.family !== undefined) {
       this.activeFamily = options.family
     }
-    return await this.credentials.credential(signal, options)
+    const cred = await this.credentials.credential(signal, options)
+    if (cred === undefined) return undefined
+    const record = await this.readRecord()
+    return record?.lineage ? { ...cred, lineage: record.lineage } : cred
   }
 
   async usage(signal?: AbortSignal, force = false): Promise<import('./quota.ts').QuotaStatusView> {

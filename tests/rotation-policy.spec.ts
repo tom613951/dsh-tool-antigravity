@@ -22,6 +22,12 @@ describe('rotation-policy', () => {
       expect(decide({ status: 429 }).action).toBe('rotate')
     })
 
+    it('rotates on a 429 with Google Resource Exhausted message', () => {
+      const decision = decide({ status: 429, message: 'Google returned 429 Resource Exhausted' })
+      expect(decision.action).toBe('rotate')
+      expect(decision.cooldownMs).toBeGreaterThan(0)
+    })
+
     it('rotates when the message says quota is exhausted', () => {
       expect(decide({ message: 'You have exhausted your quota for this model' }).action).toBe('rotate')
     })

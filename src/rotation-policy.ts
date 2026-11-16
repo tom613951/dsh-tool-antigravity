@@ -85,6 +85,13 @@ export function decideRotation(input: RotationPolicyInput): RotationDecision {
     input.random,
   )
 
+  // Status 429 or provider "resource exhausted" is account-scoped rate limiting (either
+  // per-minute quota or concurrency lock). In a multi-account pool, resting this account
+  // and rotating to another account gives the request a fresh concurrency lane and quota bucket.
+  if (input.status === 429 || (input.message !== undefined && input.message.toLowerCase().includes('resource exhausted'))) {
+    return { action: 'rotate', cooldownMs: backoff, retryAfterMs: 0, reason: reason === 'MODEL_CAPACITY_EXHAUSTED' ? 'RATE_LIMIT_EXCEEDED' : reason }
+  }
+
   switch (reason) {
     case 'QUOTA_EXHAUSTED':
     case 'RATE_LIMIT_EXCEEDED':
@@ -92,7 +99,7 @@ export function decideRotation(input: RotationPolicyInput): RotationDecision {
       return { action: 'rotate', cooldownMs: backoff, retryAfterMs: 0, reason }
     case 'MODEL_CAPACITY_EXHAUSTED':
     case 'SERVER_ERROR':
-      // Google-side pressure. Rotating would spread the damage across healthy accounts.
+      // Google-side pressure (503/529/500). Rotating would spread the damage across healthy accounts.
       return { action: 'stay', cooldownMs: 0, retryAfterMs: backoff, reason }
     case 'UNKNOWN':
       // Rotate on an unclassified failure: with several accounts signed in, trying the
