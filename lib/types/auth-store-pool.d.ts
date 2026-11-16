@@ -120,6 +120,8 @@ export interface AuthStorePool extends AntigravityAuthStore {
     setActive(lineage: string): Promise<boolean>;
     /** Drop an account entirely (logout of one account, or a revoked grant). */
     removeAccount(lineage: string): Promise<boolean>;
+    /** Read a specific account by lineage, bypassing the active cursor. */
+    readAccount(lineage: string): Promise<AntigravityAuthRecord | undefined>;
     /** Path of the backing `accounts.json`. */
     readonly path: string;
 }
@@ -130,6 +132,7 @@ export declare function defaultAuthPoolPath(authStorePath: string): string;
  * the single-record store's absent-file behaviour.
  */
 export declare function createAuthStorePool(path: string, options?: AuthStorePoolOptions): AuthStorePool;
+export declare function isCooling(account: Pick<PooledAccount, 'cooldownUntil'>, at: number): boolean;
 export declare function readPoolFile(path: string, platform?: NodeJS.Platform): Promise<AuthPoolFile>;
 export declare function writePoolFile(path: string, pool: AuthPoolFile): Promise<void>;
 /**

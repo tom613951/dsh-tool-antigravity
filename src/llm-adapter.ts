@@ -87,7 +87,16 @@ const MAX_PROVIDER_ERROR_JSON_DEPTH = 8
 const MAX_PROVIDER_PARTS = 4096
 
 export interface AntigravityAuthCredentialSource {
-  credential(signal?: AbortSignal, options?: { readonly forceRefresh?: boolean; readonly family?: string }): Promise<(HostCredential & { readonly lineage?: string }) | undefined>
+  credential(
+    signal?: AbortSignal,
+    options?: {
+      readonly forceRefresh?: boolean
+      readonly family?: string
+      readonly forTitle?: boolean
+      readonly busyLineages?: readonly string[]
+      readonly lineage?: string
+    },
+  ): Promise<(HostCredential & { readonly lineage?: string }) | undefined>
   rotateOnFailure?(failure: {
     readonly reason?: string | undefined
     readonly message?: string | undefined
@@ -160,6 +169,24 @@ export class AntigravityAdapter extends LlmAdapter {
   catalogView: AntigravityModelCatalogView
   private readonly catalogByAccount = new Map<string, { expiresAt: number; modelIds: ReadonlySet<string>; failureCode?: string | undefined }>()
   private readonly lastLiveByAccount = new Map<string, ReadonlySet<string>>()
+  private readonly inFlight = new Map<string, number>()
+
+  private getBusyLineages(): readonly string[] {
+    return Array.from(this.inFlight.entries())
+      .filter(([_, count]) => count > 0)
+      .map(([lineage]) => lineage)
+  }
+
+  private adjustInFlight(lineage: string | undefined, delta: number): void {
+    if (!lineage) return
+    const current = this.inFlight.get(lineage) ?? 0
+    const next = current + delta
+    if (next <= 0) {
+      this.inFlight.delete(lineage)
+    } else {
+      this.inFlight.set(lineage, next)
+    }
+  }
 
   constructor(private readonly adapterOptions: AntigravityAdapterOptions) {
     super()
@@ -287,6 +314,7 @@ export class AntigravityAdapter extends LlmAdapter {
       return
     }
     const family = antigravityModelFamily(options.model)
+    const isTitle = (options.messages?.[0]?.source as unknown as Record<string, unknown> | undefined)?.kind === 'dsh-session-title-llm'
     const hasEmitted = { value: false }
     let replayed = false
     let networkRetryCount = 0
@@ -294,112 +322,134 @@ export class AntigravityAdapter extends LlmAdapter {
     let rotationAttempts = 0
     const maxRotations = await this.rotationBudget()
     for (;;) {
-      const credential = await this.readCredential(signal, replayed, family)
+      const credential = await this.readCredential(signal, replayed, family, isTitle)
       if (credential === undefined) {
         throw new LlmError('Antigravity login is required before model use', 'AUTH')
       }
-      const sessionKey = requestSessionKey(options)
-      const requestScope = this.sessions.beginRequest(sessionKey)
-      let payload: Record<string, unknown> & { sentImageBytes?: Map<string, number> }
+      this.adjustInFlight(credential.lineage, 1)
+      let activeLineage: string | undefined = credential.lineage
       try {
-        payload = await buildAntigravityGeneratePayloadForAdapter(options, credential, requestScope.session, requestScope.timestamp, this.adapterOptions.attachments, this.adapterOptions.fs)
-      } catch (error) {
-        if (error instanceof LlmError) throw error
-        throw new LlmError('The Antigravity image input could not be admitted safely', 'UNSUPPORTED_MODALITY')
-      }
-      const sentImageBytes = payload.sentImageBytes
-      delete payload.sentImageBytes
-      const serialized = JSON.stringify(payload)
-      /** Images alone exceed the private route's inline image budget: negotiate a logged offload. */
-      const imageOffload = antigravityImageOffloadCount(options.messages, sentImageBytes)
-      if (imageOffload > 0) {
-        throw new LlmError(
-          `The Antigravity image payload exceeds the route image budget; offload ${String(imageOffload)} oldest retained image occurrence(s)`,
-          IMAGE_OFFLOAD_REQUIRED_CODE,
-          { offloadImages: imageOffload } as Record<string, unknown>,
-        )
-      }
-      /** Whole request exceeds the transport ceiling for reasons other than images: fail without blaming them. */
-      const requestBudget = boundedRequestBytes(this.adapterOptions.maxRequestBytes)
-      if (new TextEncoder().encode(serialized).byteLength > requestBudget) {
-        throw new LlmError('The Antigravity request exceeds the private transport byte limit', 'REQUEST_LIMIT')
-      }
-      let response: Response
-      try {
-        response = await this.transport.request({
-          url: ANTIGRAVITY_STREAM_ENDPOINT,
-          accessToken: credential.accessToken,
-          body: serialized,
-          ...(signal === undefined ? {} : { signal }),
-          responseHeaderTimeoutMs: this.options.responseHeaderTimeoutMs,
-        })
-      } catch (error) {
-        if (networkRetryCount < MAX_NETWORK_RETRIES && !hasEmitted.value && !isAborted(signal) && isRetryableNetworkError(error)) {
-          networkRetryCount += 1
-          const backoffMs = Math.min(1000 * Math.pow(2, networkRetryCount - 1), 4000)
-          await waitRetryBackoff(backoffMs, signal)
-          continue
+        const sessionKey = requestSessionKey(options)
+        const requestScope = this.sessions.beginRequest(sessionKey)
+        let payload: Record<string, unknown> & { sentImageBytes?: Map<string, number> }
+        try {
+          payload = await buildAntigravityGeneratePayloadForAdapter(options, credential, requestScope.session, requestScope.timestamp, this.adapterOptions.attachments, this.adapterOptions.fs)
+        } catch (error) {
+          if (error instanceof LlmError) throw error
+          throw new LlmError('The Antigravity image input could not be admitted safely', 'UNSUPPORTED_MODALITY')
         }
-        throw toLlmError(error)
-      }
-      const statusError = privateStatusError(response.status)
-      if (statusError !== undefined) {
-        if (statusError.code === 'authentication' && !replayed && !hasEmitted.value && !isAborted(signal)) {
-          await cancelResponse(response)
-          replayed = true
-          continue
+        const sentImageBytes = payload.sentImageBytes
+        delete payload.sentImageBytes
+        const serialized = JSON.stringify(payload)
+        /** Images alone exceed the private route's inline image budget: negotiate a logged offload. */
+        const imageOffload = antigravityImageOffloadCount(options.messages, sentImageBytes)
+        if (imageOffload > 0) {
+          throw new LlmError(
+            `The Antigravity image payload exceeds the route image budget; offload ${String(imageOffload)} oldest retained image occurrence(s)`,
+            IMAGE_OFFLOAD_REQUIRED_CODE,
+            { offloadImages: imageOffload } as Record<string, unknown>,
+          )
         }
-        if (statusError.code === 'rate-limited' && !hasEmitted.value && !isAborted(signal) && rotationAttempts < maxRotations) {
-          await cancelResponse(response)
-          const rotated = await this.tryRotate(family, response.status, 'rate-limited', credential.lineage)
-          if (rotated) {
-            rotationAttempts += 1
+        /** Whole request exceeds the transport ceiling for reasons other than images: fail without blaming them. */
+        const requestBudget = boundedRequestBytes(this.adapterOptions.maxRequestBytes)
+        if (new TextEncoder().encode(serialized).byteLength > requestBudget) {
+          throw new LlmError('The Antigravity request exceeds the private transport byte limit', 'REQUEST_LIMIT')
+        }
+        let response: Response
+        try {
+          response = await this.transport.request({
+            url: ANTIGRAVITY_STREAM_ENDPOINT,
+            accessToken: credential.accessToken,
+            body: serialized,
+            ...(signal === undefined ? {} : { signal }),
+            responseHeaderTimeoutMs: this.options.responseHeaderTimeoutMs,
+          })
+        } catch (error) {
+          if (networkRetryCount < MAX_NETWORK_RETRIES && !hasEmitted.value && !isAborted(signal) && isRetryableNetworkError(error)) {
+            networkRetryCount += 1
+            const backoffMs = Math.min(1000 * Math.pow(2, networkRetryCount - 1), 4000)
+            await waitRetryBackoff(backoffMs, signal)
             continue
           }
+          throw toLlmError(error)
         }
-        if ((response.status === 502 || response.status === 503 || response.status === 504) && networkRetryCount < MAX_NETWORK_RETRIES && !hasEmitted.value && !isAborted(signal)) {
-          await cancelResponse(response)
-          networkRetryCount += 1
-          const backoffMs = Math.min(1000 * Math.pow(2, networkRetryCount - 1), 4000)
-          await waitRetryBackoff(backoffMs, signal)
-          continue
-        }
-        if (response.status === 400 && await responseReportsContextWindowExceeded(response, {
-          ...(signal === undefined ? {} : { signal }),
-          idleTimeoutMs: this.options.idleTimeoutMs,
-          totalTimeoutMs: this.options.totalTimeoutMs,
-          maxResponseBytes: this.options.maxResponseBytes,
-          maxFrameBytes: this.options.maxFrameBytes,
-        })) {
-          throw contextWindowExceededError(response.status)
-        }
-        await cancelResponse(response)
-        throw toLlmError(statusError)
-      }
-      try {
-        yield* this.streamResponse(response, options, hasEmitted)
-        this.sessions.completeExecution(sessionKey)
-        return
-      } catch (error) {
-        const privateError = error instanceof PrivateTransportError ? error : undefined
-        if (privateError?.code === 'authentication' && !replayed && !hasEmitted.value && !isAborted(signal)) {
-          replayed = true
-          continue
-        }
-        if (privateError?.code === 'rate-limited' && !hasEmitted.value && !isAborted(signal) && rotationAttempts < maxRotations) {
-          const rotated = await this.tryRotate(family, privateError.status ?? 429, 'rate-limited', credential.lineage)
-          if (rotated) {
-            rotationAttempts += 1
+        const statusError = privateStatusError(response.status)
+        if (statusError !== undefined) {
+          if (statusError.code === 'authentication' && !replayed && !hasEmitted.value && !isAborted(signal)) {
+            await cancelResponse(response)
+            replayed = true
             continue
           }
+          if (statusError.code === 'rate-limited' && !hasEmitted.value && !isAborted(signal) && rotationAttempts < maxRotations) {
+            try {
+              const errBody = await readPrivateText(response, {
+                maxBytes: 8192,
+                idleTimeoutMs: 2000,
+                totalTimeoutMs: 2000,
+              })
+              console.error(`[AGY-429-BODY] Google 429 response on lineage ${credential.lineage}:`, errBody.slice(0, 500))
+            } catch {
+              await cancelResponse(response)
+            }
+            const rotated = await this.tryRotate(family, response.status, 'rate-limited', credential.lineage)
+            if (rotated) {
+              rotationAttempts += 1
+              continue
+            }
+          }
+          if ((response.status === 502 || response.status === 503 || response.status === 504) && networkRetryCount < MAX_NETWORK_RETRIES && !hasEmitted.value && !isAborted(signal)) {
+            await cancelResponse(response)
+            networkRetryCount += 1
+            const backoffMs = Math.min(1000 * Math.pow(2, networkRetryCount - 1), 4000)
+            await waitRetryBackoff(backoffMs, signal)
+            continue
+          }
+          if (response.status === 400 && await responseReportsContextWindowExceeded(response, {
+            ...(signal === undefined ? {} : { signal }),
+            idleTimeoutMs: this.options.idleTimeoutMs,
+            totalTimeoutMs: this.options.totalTimeoutMs,
+            maxResponseBytes: this.options.maxResponseBytes,
+            maxFrameBytes: this.options.maxFrameBytes,
+          })) {
+            throw contextWindowExceededError(response.status)
+          }
+          await cancelResponse(response)
+          throw toLlmError(statusError)
         }
-        if (networkRetryCount < MAX_NETWORK_RETRIES && !hasEmitted.value && !isAborted(signal) && isRetryableNetworkError(error)) {
-          networkRetryCount += 1
-          const backoffMs = Math.min(1000 * Math.pow(2, networkRetryCount - 1), 4000)
-          await waitRetryBackoff(backoffMs, signal)
-          continue
+        try {
+          yield* this.streamResponse(response, options, hasEmitted)
+          this.sessions.completeExecution(sessionKey)
+          return
+        } catch (error) {
+          const privateError = error instanceof PrivateTransportError ? error : undefined
+          if (privateError?.code === 'authentication' && !replayed && !hasEmitted.value && !isAborted(signal)) {
+            replayed = true
+            continue
+          }
+          if (privateError?.code === 'rate-limited' && !hasEmitted.value && !isAborted(signal) && rotationAttempts < maxRotations) {
+            const rotated = await this.tryRotate(family, privateError.status ?? 429, 'rate-limited', credential.lineage)
+            if (rotated) {
+              rotationAttempts += 1
+              continue
+            }
+          }
+          if (privateError?.code === 'rate-limited' && !hasEmitted.value) {
+            yield finishChunk('error', 'RESOURCE_EXHAUSTED', privateError.status ?? 429)
+            return
+          }
+          if (networkRetryCount < MAX_NETWORK_RETRIES && !hasEmitted.value && !isAborted(signal) && isRetryableNetworkError(error)) {
+            networkRetryCount += 1
+            const backoffMs = Math.min(1000 * Math.pow(2, networkRetryCount - 1), 4000)
+            await waitRetryBackoff(backoffMs, signal)
+            continue
+          }
+          throw toLlmError(error)
         }
-        throw toLlmError(error)
+      } finally {
+        if (activeLineage) {
+          this.adjustInFlight(activeLineage, -1)
+          activeLineage = undefined
+        }
       }
     }
   }
@@ -434,6 +484,9 @@ export class AntigravityAdapter extends LlmAdapter {
       if (event.error !== undefined) {
         eventError = event.error
         if (event.error.status === 401 || isAuthenticationCode(event.error.code)) throw new PrivateTransportError('authentication', 'The private endpoint requires authentication', { status: event.error.status ?? 401 })
+        if ((event.error.status === 429 || event.error.code === 'RESOURCE_EXHAUSTED') && !hasEmitted.value) {
+          throw new PrivateTransportError('rate-limited', 'The private endpoint is rate-limited', { status: event.error.status ?? 429 })
+        }
         break
       }
       if (event.usage !== undefined) usage = event.usage
@@ -606,11 +659,19 @@ export class AntigravityAdapter extends LlmAdapter {
     })
   }
 
-  private async readCredential(signal: AbortSignal | undefined, forceRefresh: boolean, family?: string): Promise<(HostCredential & { readonly lineage?: string }) | undefined> {
+  private async readCredential(
+    signal: AbortSignal | undefined,
+    forceRefresh: boolean,
+    family?: string,
+    forTitle?: boolean,
+  ): Promise<(HostCredential & { readonly lineage?: string }) | undefined> {
     try {
+      const busyLineages = this.getBusyLineages()
       return await this.adapterOptions.auth.credential(signal, {
         ...(forceRefresh ? { forceRefresh: true } : {}),
         ...(family !== undefined ? { family } : {}),
+        ...(forTitle ? { forTitle: true } : {}),
+        ...(busyLineages.length > 0 ? { busyLineages } : {}),
       })
     } catch (error) {
       throw toLlmError(error)

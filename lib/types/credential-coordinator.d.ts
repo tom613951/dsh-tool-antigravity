@@ -78,6 +78,7 @@ export interface CredentialCoordinatorOptions {
 export interface CredentialCoordinator {
     credential(signal?: AbortSignal, options?: {
         readonly forceRefresh?: boolean;
+        readonly lineage?: string;
     }): Promise<HostCredential | undefined>;
     replaceFromLogin(credential: HostCredential, record: AntigravityAuthRecord): void;
     /**
@@ -87,7 +88,7 @@ export interface CredentialCoordinator {
      * repointed — so the next request cannot serve a token belonging to an account that is no
      * longer selected.
      */
-    invalidateCache(): void;
+    invalidateCache(lineage?: string): void;
     status(): Promise<CredentialStatusView>;
     revokeStatus(): RevokeStatusView;
     logout(): Promise<LogoutResult>;

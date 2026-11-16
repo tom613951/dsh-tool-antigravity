@@ -3,7 +3,7 @@
 import { randomUUID, createHash } from 'node:crypto'
 import type { AntigravityAuthRecord, AntigravityAuthStore } from './auth-store.ts'
 import { createAuthStore, defaultAuthStorePath } from './auth-store.ts'
-import { createAuthStorePool, defaultAuthPoolPath, effectiveFailureCount, emailTagFor, type AuthStorePool } from './auth-store-pool.ts'
+import { createAuthStorePool, defaultAuthPoolPath, effectiveFailureCount, emailTagFor, isCooling, type AuthStorePool } from './auth-store-pool.ts'
 import { decideRotation } from './rotation-policy.ts'
 import { createCredentialCoordinator, type CredentialCoordinator, type CredentialCoordinatorOptions, type HostCredential } from './credential-coordinator.ts'
 import { createOAuthFlow, OAuthFlowError } from './oauth-flow.ts'
@@ -283,11 +283,9 @@ export class AntigravityAuthService implements BootstrapStatusService {
     if (targetLineage !== undefined) {
       await pool.markCooldown(targetLineage, decision.cooldownMs, failure.family)
     }
-    this.credentials.invalidateCache()
+    this.credentials.invalidateCache(targetLineage)
     this.quota.invalidate?.()
     this.notifyStatus()
-    // Report exhaustion explicitly so a caller can surface "every account is resting"
-    // instead of retrying against a pool that cannot serve the request.
     return (await pool.readyCount()) === 0 ? 'exhausted' : 'rotate'
   }
 
@@ -379,13 +377,57 @@ export class AntigravityAuthService implements BootstrapStatusService {
     }
   }
 
-  async credential(signal?: AbortSignal, options?: { readonly forceRefresh?: boolean; readonly family?: string }): Promise<(HostCredential & { readonly lineage?: string }) | undefined> {
+  async credential(
+    signal?: AbortSignal,
+    options?: {
+      readonly forceRefresh?: boolean
+      readonly family?: string
+      readonly forTitle?: boolean
+      readonly busyLineages?: readonly string[]
+      readonly lineage?: string
+    },
+  ): Promise<(HostCredential & { readonly lineage?: string }) | undefined> {
     if (options?.family !== undefined) {
       this.activeFamily = options.family
     }
-    const cred = await this.credentials.credential(signal, options)
+
+    let targetLineage = options?.lineage
+    if (targetLineage === undefined && this.accounts !== undefined) {
+      const poolData = await this.accounts.readPool()
+      if (poolData.accounts.length > 0) {
+        const now = Date.now()
+        const busyLineages = options?.busyLineages ?? []
+        if (options?.forTitle === true && poolData.accounts.length > 1) {
+          const primaryLineage = (await this.readRecord())?.lineage
+          const nonPrimary = poolData.accounts.filter(a => a.lineage !== primaryLineage)
+          const chosen = nonPrimary.find(a => !busyLineages.includes(a.lineage) && !isCooling(a, now))
+            ?? nonPrimary.find(a => !busyLineages.includes(a.lineage))
+            ?? nonPrimary.find(a => !isCooling(a, now))
+            ?? nonPrimary[0]
+          if (chosen !== undefined) {
+            targetLineage = chosen.lineage
+          }
+        } else if (busyLineages.length > 0) {
+          const defaultRecord = await this.readRecord()
+          if (defaultRecord?.lineage && busyLineages.includes(defaultRecord.lineage)) {
+            const freeAccount = poolData.accounts.find(a => !busyLineages.includes(a.lineage) && !isCooling(a, now))
+              ?? poolData.accounts.find(a => !busyLineages.includes(a.lineage))
+            if (freeAccount !== undefined) {
+              targetLineage = freeAccount.lineage
+            }
+          }
+        }
+      }
+    }
+
+    const cred = await this.credentials.credential(signal, {
+      ...options,
+      ...(targetLineage !== undefined ? { lineage: targetLineage } : {}),
+    })
     if (cred === undefined) return undefined
-    const record = await this.readRecord()
+    const record = targetLineage !== undefined && typeof this.accounts?.readAccount === 'function'
+      ? await this.accounts.readAccount(targetLineage)
+      : await this.readRecord()
     return record?.lineage ? { ...cred, lineage: record.lineage } : cred
   }
 

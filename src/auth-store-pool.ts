@@ -175,6 +175,8 @@ export interface AuthStorePool extends AntigravityAuthStore {
   setActive(lineage: string): Promise<boolean>
   /** Drop an account entirely (logout of one account, or a revoked grant). */
   removeAccount(lineage: string): Promise<boolean>
+  /** Read a specific account by lineage, bypassing the active cursor. */
+  readAccount(lineage: string): Promise<AntigravityAuthRecord | undefined>
   /** Path of the backing `accounts.json`. */
   readonly path: string
 }
@@ -396,6 +398,21 @@ export function createAuthStorePool(path: string, options: AuthStorePoolOptions 
         updatedAt: new Date(now()).toISOString(),
       }
     }, seedFromLegacy).then(result => result !== false),
+
+    readAccount: async (lineage: string): Promise<AntigravityAuthRecord | undefined> => {
+      const pool = await loadPool()
+      const account = pool.accounts.find(a => a.lineage === lineage)
+      if (account === undefined) return undefined
+      return {
+        version: AUTH_RECORD_VERSION,
+        refreshToken: account.refreshToken,
+        projectId: account.projectId,
+        ...(account.email === undefined ? {} : { email: account.email }),
+        revision: pool.revision,
+        updatedAt: pool.updatedAt,
+        lineage: account.lineage,
+      }
+    },
   }
 
   return store
@@ -427,7 +444,7 @@ function selectAccount(pool: AuthPoolFile, targetFamily: string | undefined, at:
   return pool.accounts[start]
 }
 
-function isCooling(account: PooledAccount, at: number): boolean {
+export function isCooling(account: Pick<PooledAccount, 'cooldownUntil'>, at: number): boolean {
   return account.cooldownUntil !== undefined && account.cooldownUntil > at
 }
 

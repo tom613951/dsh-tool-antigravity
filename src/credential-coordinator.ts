@@ -122,7 +122,7 @@ export interface CredentialCoordinatorOptions {
 }
 
 export interface CredentialCoordinator {
-  credential(signal?: AbortSignal, options?: { readonly forceRefresh?: boolean }): Promise<HostCredential | undefined>
+  credential(signal?: AbortSignal, options?: { readonly forceRefresh?: boolean; readonly lineage?: string }): Promise<HostCredential | undefined>
   replaceFromLogin(credential: HostCredential, record: AntigravityAuthRecord): void
   /**
    * Drop the cached access token without touching stored credentials.
@@ -131,7 +131,7 @@ export interface CredentialCoordinator {
    * repointed — so the next request cannot serve a token belonging to an account that is no
    * longer selected.
    */
-  invalidateCache(): void
+  invalidateCache(lineage?: string): void
   status(): Promise<CredentialStatusView>
   revokeStatus(): RevokeStatusView
   logout(): Promise<LogoutResult>
@@ -164,6 +164,8 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
   const onRefreshFailure = options.onRefreshFailure
 
   let cached: CachedCredential | undefined
+  const cacheByLineage = new Map<string, CachedCredential>()
+  const refreshFlights = new Map<string, Promise<HostCredential | undefined>>()
   let observedRevision = 0
   let observedLineage: string | undefined
   let state: CredentialState = 'logged-out'
@@ -181,34 +183,50 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
     credential: async (signal, credentialOptions) => {
       ensureNotDisposed()
       if (signal?.aborted === true) throw new CredentialOperationError('cancelled')
-      const record = await options.store.read()
+      const targetLineage = credentialOptions?.lineage
+      const storeAny = options.store as unknown as { readAccount?(l: string): Promise<AntigravityAuthRecord | undefined> }
+      const record = targetLineage !== undefined && typeof storeAny.readAccount === 'function'
+        ? await storeAny.readAccount(targetLineage)
+        : await options.store.read()
       if (record === undefined) {
         clearObservedCredential()
         return undefined
       }
       observe(record)
       if (state === 're-login-required') return undefined
-      if (credentialOptions?.forceRefresh !== true && cached !== undefined && sameRecord(cached, record) && isFresh(cached.value, now(), refreshLeadMs)) {
+      const lineageKey = record.lineage ?? '__default__'
+      const cachedEntry = cacheByLineage.get(lineageKey) ?? (cached && sameRecord(cached, record) ? cached : undefined)
+      if (credentialOptions?.forceRefresh !== true && cachedEntry !== undefined && sameRecord(cachedEntry, record) && isFresh(cachedEntry.value, now(), refreshLeadMs)) {
         state = 'logged-in'
         errorCode = undefined
-        return await waitForCaller(Promise.resolve(cached.value), signal)
+        return await waitForCaller(Promise.resolve(cachedEntry.value), signal)
       }
-      if (refreshFlight === undefined) {
-        const flight = refreshCredential(generation)
+      let flight = refreshFlights.get(lineageKey)
+      if (flight === undefined) {
+        flight = refreshCredential(generation, record)
+        refreshFlights.set(lineageKey, flight)
         refreshFlight = flight
         void flight.then(
-          () => clearRefreshFlight(flight),
-          () => clearRefreshFlight(flight),
+          () => {
+            if (refreshFlights.get(lineageKey) === flight) refreshFlights.delete(lineageKey)
+            if (refreshFlight === flight) refreshFlight = undefined
+          },
+          () => {
+            if (refreshFlights.get(lineageKey) === flight) refreshFlights.delete(lineageKey)
+            if (refreshFlight === flight) refreshFlight = undefined
+          },
         )
       }
-      return await waitForCaller(refreshFlight, signal)
+      return await waitForCaller(flight, signal)
     },
 
     replaceFromLogin: (credential, record) => {
       if (disposed) return
       generation += 1
       abortOperations()
-      cached = { value: { ...credential }, revision: record.revision, ...(record.lineage === undefined ? {} : { lineage: record.lineage }) }
+      const cachedEntry: CachedCredential = { value: { ...credential }, revision: record.revision, ...(record.lineage === undefined ? {} : { lineage: record.lineage }) }
+      cached = cachedEntry
+      cacheByLineage.set(record.lineage ?? '__default__', cachedEntry)
       observedRevision = record.revision
       observedLineage = record.lineage
       state = 'logged-in'
@@ -216,12 +234,19 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
       lastRefreshAt = undefined
       revokeStatus = { state: 'idle' }
       refreshFlight = undefined
+      refreshFlights.clear()
       revokeFlight = undefined
     },
 
-    invalidateCache: () => {
+    invalidateCache: (lineage?: string) => {
       if (disposed) return
-      cached = undefined
+      if (lineage) {
+        cacheByLineage.delete(lineage)
+        if (cached?.lineage === lineage) cached = undefined
+      } else {
+        cacheByLineage.clear()
+        cached = undefined
+      }
       // The stored record is untouched: this only forgets the in-flight access token, so a
       // subsequent call re-reads the pool and refreshes against whatever it now selects.
       lastRefreshAt = undefined
@@ -246,8 +271,10 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
       const logoutGeneration = generation
       abortOperations()
       refreshFlight = undefined
+      refreshFlights.clear()
       revokeFlight = undefined
       cached = undefined
+      cacheByLineage.clear()
       observedRevision = 0
       observedLineage = undefined
       const record = await options.store.read()
@@ -287,6 +314,7 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
       generation += 1
       abortOperations()
       refreshFlight = undefined
+      refreshFlights.clear()
       const revokeGeneration = generation
       const record = await options.store.read()
       if (!isActive(revokeGeneration)) return { state: 'superseded' }
@@ -312,8 +340,10 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
       lifecycleAbort.abort(new CredentialOperationError('cancelled', 'The Antigravity credential service was disposed'))
       abortOperations()
       refreshFlight = undefined
+      refreshFlights.clear()
       revokeFlight = undefined
       cached = undefined
+      cacheByLineage.clear()
       operations.clear()
     },
   }
@@ -348,6 +378,7 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
 
   function clearObservedCredential(): void {
     cached = undefined
+    cacheByLineage.clear()
     observedRevision = 0
     observedLineage = undefined
     if (!disposed) {
@@ -392,14 +423,16 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
     }
   }
 
-  async function refreshCredential(startGeneration: number): Promise<HostCredential | undefined> {
+  async function refreshCredential(startGeneration: number, targetRecord?: AntigravityAuthRecord): Promise<HostCredential | undefined> {
     if (disposed || startGeneration !== generation) return undefined
-    let record = await options.store.read()
+    const storeAny = options.store as unknown as { readAccount?(l: string): Promise<AntigravityAuthRecord | undefined> }
+    const initialRecord = targetRecord ?? await options.store.read()
     if (!isActive(startGeneration)) return undefined
-    if (record === undefined) {
+    if (initialRecord === undefined) {
       clearObservedCredential()
       return undefined
     }
+    let record: AntigravityAuthRecord = initialRecord
     observe(record)
     if (state === 're-login-required') return undefined
 
@@ -411,7 +444,7 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
       let result: RefreshAccessTokenResult
       try {
         result = await runBounded(
-          signal => refreshAccessToken({ refreshToken: record!.refreshToken, signal }),
+          signal => refreshAccessToken({ refreshToken: record.refreshToken, signal }),
           operation,
           operationTimeoutMs,
         )
@@ -419,13 +452,15 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
       } catch (error) {
         endOperation(operation)
         if (!isActive(startGeneration) || isCancelled(error)) return undefined
-        setRefreshFailure(error)
+        setRefreshFailure(error, record.lineage)
         return undefined
       }
       endOperation(operation)
       if (!isActive(startGeneration)) return undefined
 
-      const current = await options.store.read()
+      const current: AntigravityAuthRecord | undefined = record.lineage !== undefined && typeof storeAny.readAccount === 'function'
+        ? await storeAny.readAccount(record.lineage)
+        : await options.store.read()
       if (!isActive(startGeneration)) return undefined
       const responseRefreshToken = result.refreshToken ?? record.refreshToken
       if (current === undefined) {
@@ -458,7 +493,9 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
       )
       if (committed !== undefined) return adoptRefreshedCredential(result, committed, startGeneration)
 
-      const latest = await options.store.read()
+      const latest: AntigravityAuthRecord | undefined = record.lineage !== undefined && typeof storeAny.readAccount === 'function'
+        ? await storeAny.readAccount(record.lineage)
+        : await options.store.read()
       if (!isActive(startGeneration)) return undefined
       if (latest === undefined) {
         clearObservedCredential()
@@ -490,7 +527,10 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
       expiresAt: result.expiresAt,
       projectId: record.projectId,
     }
-    cached = { value: credential, revision: record.revision, ...(record.lineage === undefined ? {} : { lineage: record.lineage }) }
+    const lineageKey = record.lineage ?? '__default__'
+    const cachedEntry: CachedCredential = { value: credential, revision: record.revision, ...(record.lineage === undefined ? {} : { lineage: record.lineage }) }
+    cached = cachedEntry
+    cacheByLineage.set(lineageKey, cachedEntry)
     observedRevision = record.revision
     observedLineage = record.lineage
     state = 'logged-in'
@@ -545,11 +585,17 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
     return !disposed && expectedGeneration === generation
   }
 
-  function setRefreshFailure(error: unknown): void {
+  function setRefreshFailure(error: unknown, lineage?: string): void {
     const code = error instanceof CredentialOperationError ? error.code : 'network'
     state = code === 'invalid-grant' ? 're-login-required' : 'refresh-failed'
     errorCode = code
-    cached = undefined
+    if (lineage) {
+      cacheByLineage.delete(lineage)
+      if (cached?.lineage === lineage) cached = undefined
+    } else {
+      cacheByLineage.clear()
+      cached = undefined
+    }
     // Tell the pool this account failed so the next `read()` can pick a different one.
     // Deliberately not awaited and never allowed to reject: rotation is an optimisation,
     // and a rotation failure must not replace the real credential error the caller sees.

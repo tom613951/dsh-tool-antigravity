@@ -16,6 +16,9 @@ export interface AntigravityAuthCredentialSource {
     credential(signal?: AbortSignal, options?: {
         readonly forceRefresh?: boolean;
         readonly family?: string;
+        readonly forTitle?: boolean;
+        readonly busyLineages?: readonly string[];
+        readonly lineage?: string;
     }): Promise<(HostCredential & {
         readonly lineage?: string;
     }) | undefined>;
@@ -67,6 +70,9 @@ export declare class AntigravityAdapter extends LlmAdapter {
     catalogView: AntigravityModelCatalogView;
     private readonly catalogByAccount;
     private readonly lastLiveByAccount;
+    private readonly inFlight;
+    private getBusyLineages;
+    private adjustInFlight;
     constructor(adapterOptions: AntigravityAdapterOptions);
     providerInfo(provider: string): LlmProviderInfo;
     providerRetryPolicy(): ResolvedRetryPolicy;

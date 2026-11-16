@@ -122,6 +122,9 @@ export declare class AntigravityAuthService implements BootstrapStatusService {
     credential(signal?: AbortSignal, options?: {
         readonly forceRefresh?: boolean;
         readonly family?: string;
+        readonly forTitle?: boolean;
+        readonly busyLineages?: readonly string[];
+        readonly lineage?: string;
     }): Promise<(HostCredential & {
         readonly lineage?: string;
     }) | undefined>;
