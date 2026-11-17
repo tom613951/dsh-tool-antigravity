@@ -380,18 +380,19 @@ export class AntigravityAdapter extends LlmAdapter {
             replayed = true
             continue
           }
-          if (statusError.code === 'rate-limited' && !hasEmitted.value && !isAborted(signal) && rotationAttempts < maxRotations) {
+          if ((statusError.code === 'rate-limited' || statusError.code === 'forbidden') && !hasEmitted.value && !isAborted(signal) && rotationAttempts < maxRotations) {
+            let errBody = ''
             try {
-              const errBody = await readPrivateText(response, {
+              errBody = await readPrivateText(response, {
                 maxBytes: 8192,
                 idleTimeoutMs: 2000,
                 totalTimeoutMs: 2000,
               })
-              console.error(`[AGY-429-BODY] Google 429 response on lineage ${credential.lineage}:`, errBody.slice(0, 500))
+              console.error(`[AGY-${response.status}-BODY] Google ${response.status} response on lineage ${credential.lineage}:`, errBody.slice(0, 500))
             } catch {
               await cancelResponse(response)
             }
-            const rotated = await this.tryRotate(family, response.status, 'rate-limited', credential.lineage)
+            const rotated = await this.tryRotate(family, response.status, errBody || statusError.code, credential.lineage)
             if (rotated) {
               rotationAttempts += 1
               continue
@@ -426,8 +427,8 @@ export class AntigravityAdapter extends LlmAdapter {
             replayed = true
             continue
           }
-          if (privateError?.code === 'rate-limited' && !hasEmitted.value && !isAborted(signal) && rotationAttempts < maxRotations) {
-            const rotated = await this.tryRotate(family, privateError.status ?? 429, 'rate-limited', credential.lineage)
+          if ((privateError?.code === 'rate-limited' || privateError?.code === 'forbidden') && !hasEmitted.value && !isAborted(signal) && rotationAttempts < maxRotations) {
+            const rotated = await this.tryRotate(family, privateError.status ?? (privateError.code === 'forbidden' ? 403 : 429), privateError.message || privateError.code, credential.lineage)
             if (rotated) {
               rotationAttempts += 1
               continue
@@ -486,6 +487,9 @@ export class AntigravityAdapter extends LlmAdapter {
         if (event.error.status === 401 || isAuthenticationCode(event.error.code)) throw new PrivateTransportError('authentication', 'The private endpoint requires authentication', { status: event.error.status ?? 401 })
         if ((event.error.status === 429 || event.error.code === 'RESOURCE_EXHAUSTED') && !hasEmitted.value) {
           throw new PrivateTransportError('rate-limited', 'The private endpoint is rate-limited', { status: event.error.status ?? 429 })
+        }
+        if ((event.error.status === 403 || event.error.code === 'PERMISSION_DENIED') && !hasEmitted.value) {
+          throw new PrivateTransportError('forbidden', 'The private endpoint forbade this account', { status: event.error.status ?? 403 })
         }
         break
       }

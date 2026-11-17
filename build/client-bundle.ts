@@ -1,6 +1,6 @@
-import type { Options } from 'tsdown'
+import type { UserConfig } from 'tsdown'
 
-export function clientBundle(packageName: string): Options {
+export function clientBundle(packageName: string): UserConfig {
   return {
     entry: {
       client: 'src/client/index.ts',

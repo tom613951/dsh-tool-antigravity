@@ -354,4 +354,58 @@ describe('D: LLM 429 automatically rotates accounts and recovers generation', ()
     expect(chunks.some(chunk => chunk.type === 'text-delta' && chunk.text === 'hello from account b')).toBe(true)
     expect(await service.readyAccountCount()).toBe(1)
   })
+
+  it('switches from a forbidden (403) account to the next ready account on 403 during stream', async () => {
+    const { directory, storePath } = await workspace()
+    const pool = createAuthStorePool(join(directory, 'accounts.json'))
+    await pool.commit({ refreshToken: 'token-a', projectId: 'p', email: 'a@example.com' })
+    await pool.commit({ refreshToken: 'token-b', projectId: 'p', email: 'b@example.com' })
+
+    const service = createAntigravityAuthService({
+      storePath,
+      multiAccount: true,
+      gates: createMemoryCapabilityGates(),
+      credentialOptions: {
+        refreshToken: async ({ refreshToken }) => ({
+          accessToken: `access-for-${refreshToken}`,
+          expiresAt: Date.now() + 3_600_000,
+        }),
+      },
+    })
+
+    const requests: string[] = []
+    const transport = {
+      request: vi.fn(async (input: { accessToken?: string }) => {
+        const token = input.accessToken ?? ''
+        requests.push(token)
+        if (token === 'access-for-token-a') {
+          return new Response('{"error":{"code":403,"message":"This service has been disabled in this account for violation of Terms of Service.","status":"PERMISSION_DENIED"}}', { status: 403 })
+        }
+        return new Response('data: {"response":{"parts":[{"text":"hello from account b after 403"}],"finishReason":"STOP"}}\n\n')
+      }),
+    }
+
+    const adapter = new AntigravityAdapter({
+      auth: service,
+      transport,
+    })
+
+    const chunks = []
+    for await (const chunk of adapter.stream({
+      provider: 'google-antigravity',
+      model: 'antigravity-gemini-3.8-flash',
+      messages: [{
+        id: 'msg-1' as never,
+        role: 'user',
+        content: [{ type: 'text', text: 'hi' }],
+        source: { kind: 'user' },
+      }],
+    })) {
+      chunks.push(chunk)
+    }
+
+    expect(requests).toEqual(['access-for-token-a', 'access-for-token-b'])
+    expect(chunks.some(chunk => chunk.type === 'text-delta' && chunk.text === 'hello from account b after 403')).toBe(true)
+    expect(await service.readyAccountCount()).toBe(1)
+  })
 })

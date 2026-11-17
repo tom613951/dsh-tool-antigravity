@@ -22,6 +22,18 @@ describe('rotation-policy', () => {
       expect(decide({ status: 429 }).action).toBe('rotate')
     })
 
+    it('rotates on a 403 Forbidden with 24-hour cooldown', () => {
+      const decision = decide({ status: 403 })
+      expect(decision.action).toBe('rotate')
+      expect(decision.cooldownMs).toBe(24 * 60 * 60 * 1000)
+    })
+
+    it('rotates on TOS_VIOLATION with 24-hour cooldown', () => {
+      const decision = decide({ message: 'TOS_VIOLATION: This service has been disabled in this account for violation of Terms of Service' })
+      expect(decision.action).toBe('rotate')
+      expect(decision.cooldownMs).toBe(24 * 60 * 60 * 1000)
+    })
+
     it('rotates on a 429 with Google Resource Exhausted message', () => {
       const decision = decide({ status: 429, message: 'Google returned 429 Resource Exhausted' })
       expect(decision.action).toBe('rotate')

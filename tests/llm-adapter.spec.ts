@@ -604,6 +604,29 @@ describe('Antigravity LLM adapter', () => {
     expect(chunks.some(chunk => chunk.type === 'text-delta' && chunk.text === 'recovered-rotated')).toBe(true)
   })
 
+  it('rotates to next account and retries after a pre-delta 403 forbidden response', async () => {
+    const transport = {
+      request: vi.fn()
+        .mockResolvedValueOnce(new Response('{"error":{"code":403,"message":"This service has been disabled in this account for violation of Terms of Service.","status":"PERMISSION_DENIED"}}', { status: 403 }))
+        .mockResolvedValueOnce(new Response('data: {"response":{"parts":[{"text":"recovered-rotated-403"}],"finishReason":"STOP"}}\n\n')),
+    }
+    const rotateOnFailure = vi.fn().mockResolvedValue('rotate')
+    const auth = {
+      credential: vi.fn()
+        .mockResolvedValueOnce(credential('account-a'))
+        .mockResolvedValueOnce(credential('account-b')),
+      rotateOnFailure,
+      accountCount: vi.fn().mockResolvedValue(2),
+    }
+    const adapter = new AntigravityAdapter({ auth, transport })
+    const chunks: StreamChunk[] = []
+    for await (const chunk of adapter.stream(options({ model: 'antigravity-gemini-3.8-flash' }))) chunks.push(chunk)
+    expect(rotateOnFailure).toHaveBeenCalledWith(expect.objectContaining({ status: 403, family: 'gemini' }))
+    expect(transport.request).toHaveBeenCalledTimes(2)
+    expect(auth.credential).toHaveBeenCalledTimes(2)
+    expect(chunks.some(chunk => chunk.type === 'text-delta' && chunk.text === 'recovered-rotated-403')).toBe(true)
+  })
+
   it('throws rate limit error when rotation budget is exhausted', async () => {
     const transport = {
       request: vi.fn().mockResolvedValue(new Response('', { status: 429 })),
@@ -1431,6 +1454,8 @@ describe('Antigravity LLM adapter', () => {
       auth: {
         credential: vi.fn(async () => ({
           accessToken: token,
+          refreshToken: 'refresh-' + token,
+          expiresAt: Date.now() + 3_600_000,
           projectId: 'aicode-consumers',
         })),
       },

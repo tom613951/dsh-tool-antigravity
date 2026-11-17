@@ -77,6 +77,20 @@ export function decideRotation(input: RotationPolicyInput): RotationDecision {
     return { action: 'relogin', cooldownMs: 0, retryAfterMs: 0, reason: 'UNKNOWN' }
   }
 
+  // Status 403, TOS violation, or permission denied: account-scoped forbidden / disabled by Google.
+  // Resting for 24 hours ensures this disabled account is bypassed during pool selection.
+  if (
+    input.status === 403
+    || (input.message !== undefined && (
+      input.message.includes('TOS_VIOLATION')
+      || input.message.includes('PERMISSION_DENIED')
+      || input.message.toLowerCase().includes('terms of service')
+      || input.message.toLowerCase().includes('disabled in this account')
+    ))
+  ) {
+    return { action: 'rotate', cooldownMs: 24 * 60 * 60 * 1000, retryAfterMs: 0, reason: 'UNKNOWN' }
+  }
+
   const reason = parseRateLimitReason(input.reason, input.message, input.status)
   const backoff = calculateBackoffMs(
     reason,
