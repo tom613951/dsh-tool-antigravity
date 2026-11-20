@@ -1,5 +1,5 @@
 
-# dsh-tool-antigravity（nnd不用了，封两个号了）
+# dsh-tool-antigravity（nnd不用了，封两个号了;解封了）
 
 搭配本人 https://github.com/tom613951/dsh-purge 使用即可。
 
